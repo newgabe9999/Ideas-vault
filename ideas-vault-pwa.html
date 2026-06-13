@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0F0F13" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Ideas Vault" />
+  <title>Ideas Vault</title>
+  <link rel="manifest" href="manifest.json" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { background: #0F0F13; min-height: 100vh; min-height: -webkit-fill-available; }
+    body { font-family: 'Segoe UI', sans-serif; color: #E8E8F0; -webkit-tap-highlight-color: transparent; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-thumb { background: #2A2A40; border-radius: 3px; }
+    textarea, input { -webkit-appearance: none; font-family: 'Segoe UI', sans-serif; }
+    textarea:focus, input:focus { outline: none; }
+    button { -webkit-tap-highlight-color: transparent; font-family: 'Segoe UI', sans-serif; }
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.75);
+      display: flex; align-items: center; justify-content: center; z-index: 999;
+    }
+    .modal-box {
+      background: #16161E; border: 1px solid #2A2A40; border-radius: 18px;
+      padding: 28px 24px; width: 92%; max-width: 340px;
+    }
+    #install-banner {
+      display: none; position: fixed; bottom: 0; left: 0; right: 0;
+      background: #1A1A26; border-top: 1px solid #2A2A40;
+      padding: 14px 20px; z-index: 998;
+      flex-direction: row; align-items: center; justify-content: space-between; gap: 12px;
+    }
+    #install-banner.visible { display: flex; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- Banner de instalación -->
+<div id="install-banner">
+  <span style="font-size:0.88rem; color:#AAA;">Instala Ideas Vault en tu teléfono</span>
+  <div style="display:flex; gap:8px;">
+    <button id="install-dismiss" style="background:transparent;border:1px solid #333;color:#666;padding:7px 14px;border-radius:8px;font-size:0.82rem;cursor:pointer;">Ahora no</button>
+    <button id="install-btn" style="background:linear-gradient(135deg,#5A50EE,#8B5CF6);color:#fff;border:none;padding:7px 16px;border-radius:8px;font-size:0.82rem;font-weight:600;cursor:pointer;">Instalar</button>
+  </div>
+</div>
+
+<script>
+  // Service Worker registration
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function() {
+      navigator.serviceWorker.register('sw.js').catch(function(e){ console.log('SW error:', e); });
+    });
+  }
+
+  // PWA install prompt
+  var deferredPrompt = null;
+  window.addEventListener('beforeinstallprompt', function(e) {
+    e.preventDefault();
+    deferredPrompt = e;
+    document.getElementById('install-banner').classList.add('visible');
+  });
+  document.getElementById('install-btn').addEventListener('click', function() {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    deferredPrompt.userChoice.then(function() {
+      deferredPrompt = null;
+      document.getElementById('install-banner').classList.remove('visible');
+    });
+  });
+  document.getElementById('install-dismiss').addEventListener('click', function() {
+    document.getElementById('install-banner').classList.remove('visible');
+  });
+  window.addEventListener('appinstalled', function() {
+    document.getElementById('install-banner').classList.remove('visible');
+  });
+</script>
+
+<script type="text/babel">
+
+var useState = React.useState;
+var useEffect = React.useEffect;
+
+var STORAGE_KEY = "ideas-vault-v1";
+
+function loadIdeas() {
+  try { var r = localStorage.getItem(STORAGE_KEY); return r ? JSON.parse(r) : []; }
+  catch(e) { return []; }
+}
+function saveIdeas(ideas) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(ideas)); }
+  catch(e) { alert("Error al guardar: " + e.message); }
+}
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
+
+var INTERVALS = [0,1,3,7,14,30,60];
+function nextReviewDate(level) {
+  var days = INTERVALS[Math.min(level, INTERVALS.length-1)];
+  var d = new Date(); d.setDate(d.getDate()+days); d.setHours(0,0,0,0);
+  return d.toISOString();
+}
+function isDue(idea) {
+  if (!idea.nextReview) return true;
+  return new Date(idea.nextReview) <= new Date();
+}
+function shuffle(arr) {
+  var a = arr.slice();
+  for (var i = a.length-1; i > 0; i--) {
+    var j = Math.floor(Math.random()*(i+1));
+    var t = a[i]; a[i] = a[j]; a[j] = t;
+  }
+  return a;
+}
+function fmtDate(iso) {
+  if (!iso) return "-";
+  return new Date(iso).toLocaleDateString("es-MX", {day:"numeric", month:"short", year:"numeric"});
+}
+function todayStr() { return new Date().toISOString().slice(0,10); }
+
+// ── Exportar PDF ──────────────────────────────────────────────────────────────
+function exportPDF(ideas) {
+  var doc = new window.jspdf.jsPDF({ unit:"mm", format:"a4" });
+  var pageW = doc.internal.pageSize.getWidth();
+  var pageH = doc.internal.pageSize.getHeight();
+  var margin = 20; var maxW = pageW - margin*2; var lineH = 7; var y = margin;
+  doc.setFont("helvetica","normal"); doc.setFontSize(11); doc.setTextColor(30,30,30);
+  for (var i = 0; i < ideas.length; i++) {
+    var lines = doc.splitTextToSize(ideas[i].text, maxW);
+    for (var l = 0; l < lines.length; l++) {
+      if (y + lineH > pageH - margin) { doc.addPage(); y = margin; }
+      doc.text(lines[l], margin, y); y += lineH;
+    }
+    if (i < ideas.length-1) { y += lineH; if (y+lineH > pageH-margin) { doc.addPage(); y = margin; } }
+  }
+  doc.save("ideas-vault-" + todayStr() + ".pdf");
+}
+
+function exportXLSX(ideas) {
+  var rows = ideas.map(function(idea,i) {
+    var o = {}; o["#"]=i+1; o["Idea"]=idea.text; o["Creada"]=fmtDate(idea.createdAt);
+    o["Nivel SR"]=idea.srLevel||0; o["Proximo repaso"]=fmtDate(idea.nextReview); o["Ultimo repaso"]=fmtDate(idea.lastReviewed);
+    return o;
+  });
+  var ws = XLSX.utils.json_to_sheet(rows);
+  ws["!cols"] = [{wch:4},{wch:80},{wch:14},{wch:10},{wch:16},{wch:16}];
+  var wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Ideas");
+  XLSX.writeFile(wb,"ideas-vault-"+todayStr()+".xlsx");
+}
+
+function exportCSV(ideas) {
+  var header = ["#","Idea","Creada","Nivel SR","Proximo repaso","Ultimo repaso"];
+  var rows = ideas.map(function(idea,i) {
+    return [i+1, '"'+idea.text.replace(/"/g,'""')+'"', fmtDate(idea.createdAt), idea.srLevel||0, fmtDate(idea.nextReview), fmtDate(idea.lastReviewed)];
+  });
+  var csv = [header].concat(rows).map(function(r){ return r.join(","); }).join("\n");
+  var blob = new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8;"});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a"); a.href=url; a.download="ideas-vault-"+todayStr()+".csv";
+  a.click(); URL.revokeObjectURL(url);
+}
+
+function exportMarkdown(ideas) {
+  var parts = ideas.map(function(idea){ return idea.text; });
+  var md = parts.join("\n\n---\n\n");
+  var blob = new Blob([md],{type:"text/markdown;charset=utf-8;"});
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a"); a.href=url; a.download="ideas-vault-"+todayStr()+".md";
+  a.click(); URL.revokeObjectURL(url);
+}
+
+// ── Modal Exportar ────────────────────────────────────────────────────────────
+function ExportModal(props) {
+  var s = useState(""); var msg = s[0]; var setMsg = s[1];
+  function doExport(type) {
+    if (type==="xlsx") { exportXLSX(props.ideas); setMsg("Listo: Excel descargado"); }
+    else if (type==="csv") { exportCSV(props.ideas); setMsg("Listo: CSV descargado"); }
+    else if (type==="pdf") { exportPDF(props.ideas); setMsg("Listo: PDF descargado"); }
+    else if (type==="md")  { exportMarkdown(props.ideas); setMsg("Listo: Markdown descargado"); }
+    setTimeout(function(){ setMsg(""); props.onClose(); }, 1800);
+  }
+  var row = { display:"flex", alignItems:"center", gap:"14px", background:"#1A1A26", border:"1px solid #2A2A3A", borderRadius:"12px", padding:"14px 16px", cursor:"pointer", textAlign:"left", width:"100%", marginBottom:"10px" };
+  return (
+    <div className="modal-overlay" onClick={props.onClose}>
+      <div className="modal-box" onClick={function(e){e.stopPropagation();}}>
+        <h3 style={{fontSize:"1.1rem",fontWeight:700,color:"#E0DFF8",marginBottom:"6px"}}>Exportar ideas</h3>
+        <p style={{fontSize:"0.82rem",color:"#555",marginBottom:"20px"}}>{props.ideas.length} ideas guardadas</p>
+        {msg ? (
+          <div style={{textAlign:"center",color:"#6FCF6F",fontSize:"0.95rem",padding:"16px 0"}}>{msg}</div>
+        ) : (
+          <div>
+            <button onClick={function(){doExport("xlsx");}} style={row}>
+              <span style={{fontSize:"1.4rem"}}>📊</span>
+              <div><div style={{fontSize:"0.95rem",fontWeight:600,color:"#D0CFEE"}}>Excel (.xlsx)</div><div style={{fontSize:"0.77rem",color:"#555"}}>Microsoft Excel</div></div>
+            </button>
+            <button onClick={function(){doExport("csv");}} style={row}>
+              <span style={{fontSize:"1.4rem"}}>🗂</span>
+              <div><div style={{fontSize:"0.95rem",fontWeight:600,color:"#D0CFEE"}}>CSV (.csv)</div><div style={{fontSize:"0.77rem",color:"#555"}}>Google Sheets</div></div>
+            </button>
+            <button onClick={function(){doExport("pdf");}} style={row}>
+              <span style={{fontSize:"1.4rem"}}>📄</span>
+              <div><div style={{fontSize:"0.95rem",fontWeight:600,color:"#D0CFEE"}}>PDF (.pdf)</div><div style={{fontSize:"0.77rem",color:"#555"}}>Texto limpio</div></div>
+            </button>
+            <button onClick={function(){doExport("md");}} style={Object.assign({},row,{marginBottom:0})}>
+              <span style={{fontSize:"1.4rem"}}>📝</span>
+              <div><div style={{fontSize:"0.95rem",fontWeight:600,color:"#D0CFEE"}}>Markdown (.md)</div><div style={{fontSize:"0.77rem",color:"#555"}}>Obsidian y editores</div></div>
+            </button>
+          </div>
+        )}
+        <button onClick={props.onClose} style={{marginTop:"18px",background:"none",border:"none",color:"#444",fontSize:"0.85rem",cursor:"pointer",width:"100%",textAlign:"center"}}>Cancelar</button>
+      </div>
+    </div>
+  );
+}
+
+// ── Blink Button ──────────────────────────────────────────────────────────────
+function BlinkButton(props) {
+  var s = useState(false); var glow = s[0]; var setGlow = s[1];
+  useEffect(function(){
+    var t = setInterval(function(){setGlow(function(g){return !g;});},700);
+    return function(){clearInterval(t);};
+  },[]);
+  return (
+    <button onClick={props.onClick} style={{
+      background: glow?"linear-gradient(135deg,#6C63FF,#9B59B6)":"linear-gradient(135deg,#4A3FBF,#7D4FA0)",
+      color:"#fff",border:"none",borderRadius:"12px",padding:"16px 36px",
+      fontSize:"1.05rem",fontWeight:600,cursor:"pointer",
+      boxShadow: glow?"0 0 22px rgba(108,99,255,0.6)":"0 0 6px rgba(108,99,255,0.2)",
+      transition:"background 0.4s,box-shadow 0.4s", minWidth:"160px"
+    }}>{props.label}</button>
+  );
+}
+
+// ── Pantalla Captura ──────────────────────────────────────────────────────────
+function CaptureScreen(props) {
+  var s1 = useState(""); var text = s1[0]; var setText = s1[1];
+  var s2 = useState(false); var saved = s2[0]; var setSaved = s2[1];
+  var MAX = 1800;
+
+  function handleSave() {
+    var t = text.trim(); if (!t) return;
+    props.onSave(t); setText(""); setSaved(true);
+    setTimeout(function(){setSaved(false);},2000);
+  }
+  function handleKeyDown(e) {
+    if ((e.ctrlKey||e.metaKey) && e.key==="Enter") handleSave();
+  }
+
+  return (
+    <div style={S.screen}>
+      <div style={S.header}>
+        <div>
+          <h1 style={S.appTitle}>💡 Ideas Vault</h1>
+          <p style={S.subtitle}>Captura lo que quieres recordar</p>
+        </div>
+        <button onClick={props.onGoReview} style={Object.assign({},S.reviewBtn,props.dueCount>0?S.reviewBtnActive:{})}>
+          <span>🔁</span><span>Repasar</span>
+          {props.dueCount>0 && <span style={S.badge}>{props.dueCount}</span>}
+        </button>
+      </div>
+
+      <div style={S.cardCapture}>
+        <textarea
+          value={text}
+          onChange={function(e){if(e.target.value.length<=MAX)setText(e.target.value);}}
+          onKeyDown={handleKeyDown}
+          placeholder={"Escribe tu idea aqu\u00ed...\n\nUna frase, reflexi\u00f3n, concepto o cita. M\u00e1ximo 5 p\u00e1rrafos."}
+          style={S.textarea}
+        />
+        <div style={S.textareaFooter}>
+          <span style={{color:text.length>MAX*0.9?"#E07070":"#888",fontSize:"0.8rem"}}>{text.length} / {MAX}</span>
+          <button onClick={handleSave} disabled={!text.trim()} style={Object.assign({},S.saveBtn,{opacity:text.trim()?1:0.4,cursor:text.trim()?"pointer":"not-allowed"})}>
+            {saved ? "✓ Guardada" : "Guardar idea"}
+          </button>
+        </div>
+      </div>
+
+      <div style={S.stats}>
+        <div style={S.statBox}>
+          <span style={S.statNum}>{props.totalIdeas}</span>
+          <span style={S.statLabel}>ideas guardadas</span>
+        </div>
+        <div style={S.statDivider} />
+        <div style={S.statBox}>
+          <span style={Object.assign({},S.statNum,{color:props.dueCount>0?"#9B8FFF":"#555"})}>{props.dueCount}</span>
+          <span style={S.statLabel}>pendientes hoy</span>
+        </div>
+      </div>
+
+      <div style={{display:"flex",gap:"10px",marginTop:"14px"}}>
+        <button onClick={props.onGoLibrary} style={Object.assign({},S.bottomBtn,{flex:1})}>📚 Biblioteca</button>
+        <button onClick={props.onGoExport} disabled={props.totalIdeas===0} style={Object.assign({},S.bottomBtn,{flex:1,opacity:props.totalIdeas>0?1:0.35,cursor:props.totalIdeas>0?"pointer":"not-allowed"})}>⬇ Exportar</button>
+      </div>
+    </div>
+  );
+}
+
+// ── Pantalla Biblioteca ───────────────────────────────────────────────────────
+function LibraryScreen(props) {
+  var s1=useState(""); var search=s1[0]; var setSearch=s1[1];
+  var s2=useState(null); var editingId=s2[0]; var setEditingId=s2[1];
+  var s3=useState(""); var editText=s3[0]; var setEditText=s3[1];
+  var s4=useState(null); var confirmDelete=s4[0]; var setConfirmDelete=s4[1];
+  var MAX=1800;
+
+  var filtered = props.ideas.filter(function(i){
+    return i.text.toLowerCase().indexOf(search.toLowerCase())!==-1;
+  });
+
+  function startEdit(idea){setEditingId(idea.id);setEditText(idea.text);}
+  function saveEdit(id){var t=editText.trim();if(!t)return;props.onUpdateIdea(id,{text:t});setEditingId(null);}
+
+  return (
+    <div style={S.screen}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"18px"}}>
+        <div>
+          <button onClick={props.onBack} style={S.backNavBtn}>← Volver</button>
+          <h2 style={{margin:"8px 0 0",fontSize:"1.2rem",fontWeight:700,color:"#E0DFF8"}}>Biblioteca · {props.ideas.length} ideas</h2>
+        </div>
+        <button onClick={props.onGoExport} disabled={props.ideas.length===0} style={Object.assign({},S.bottomBtn,{opacity:props.ideas.length>0?1:0.35})}>⬇ Exportar</button>
+      </div>
+
+      <div style={S.searchWrap}>
+        <span style={{color:"#555"}}>🔍</span>
+        <input value={search} onChange={function(e){setSearch(e.target.value);}} placeholder={"Buscar ideas..."} style={S.searchInput} />
+        {search && <button onClick={function(){setSearch("");}} style={{background:"none",border:"none",color:"#555",cursor:"pointer"}}>✕</button>}
+      </div>
+
+      <div style={{display:"flex",flexDirection:"column",gap:"10px",paddingBottom:"40px"}}>
+        {filtered.length===0 && <p style={{textAlign:"center",color:"#444",marginTop:"40px",fontSize:"0.9rem"}}>{search?"Sin resultados.":"No hay ideas aún."}</p>}
+        {filtered.map(function(idea){
+          return (
+            <div key={idea.id} style={S.libCard}>
+              {editingId===idea.id ? (
+                <div>
+                  <textarea value={editText} onChange={function(e){if(e.target.value.length<=MAX)setEditText(e.target.value);}} autoFocus
+                    style={Object.assign({},S.textarea,{minHeight:"100px",padding:"12px",border:"1px solid #4A3FBF",borderRadius:"10px",width:"100%"})} />
+                  <div style={{display:"flex",gap:"8px",marginTop:"10px",justifyContent:"flex-end"}}>
+                    <button onClick={function(){setEditingId(null);}} style={S.cancelBtn}>Cancelar</button>
+                    <button onClick={function(){saveEdit(idea.id);}} disabled={!editText.trim()} style={Object.assign({},S.saveSmallBtn,{opacity:editText.trim()?1:0.4})}>Guardar</button>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <p style={S.libCardText}>{idea.text}</p>
+                  <div style={S.libCardMeta}>
+                    <span style={{fontSize:"0.75rem",color:"#444"}}>{fmtDate(idea.createdAt)}</span>
+                    <span style={{fontSize:"0.72rem",color:"#3A3A60",letterSpacing:"0.08em"}}>{"◆".repeat(Math.min(idea.srLevel||0,6))+"◇".repeat(Math.max(6-(idea.srLevel||0),0))}</span>
+                    <div style={{display:"flex",gap:"6px"}}>
+                      <button onClick={function(){startEdit(idea);}} style={S.editBtn}>✏️ Editar</button>
+                      <button onClick={function(){setConfirmDelete(idea.id);}} style={S.deleteBtn}>🗑</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+              {confirmDelete===idea.id && (
+                <div style={S.confirmWrap}>
+                  <span style={{fontSize:"0.85rem",color:"#ccc"}}>¿Eliminar esta idea?</span>
+                  <div style={{display:"flex",gap:"8px"}}>
+                    <button onClick={function(){setConfirmDelete(null);}} style={S.cancelBtn}>No</button>
+                    <button onClick={function(){props.onDeleteIdea(idea.id);setConfirmDelete(null);}} style={S.deleteConfirmBtn}>Sí, eliminar</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Pantalla Repaso ───────────────────────────────────────────────────────────
+function ReviewScreen(props) {
+  var due = props.ideas.filter(isDue);
+  var s1=useState(function(){return shuffle(due);}); var queue=s1[0];
+  var s2=useState(0); var idx=s2[0]; var setIdx=s2[1];
+  var s3=useState(false); var done=s3[0]; var setDone=s3[1];
+  var s4=useState(1); var opacity=s4[0]; var setOpacity=s4[1];
+
+  function next(remembered) {
+    var idea=queue[idx];
+    var newLevel=remembered?Math.min((idea.srLevel||0)+1,INTERVALS.length-1):0;
+    props.onUpdateIdea(idea.id,{srLevel:newLevel,nextReview:nextReviewDate(newLevel),lastReviewed:new Date().toISOString()});
+    setOpacity(0);
+    setTimeout(function(){
+      if(idx+1>=queue.length)setDone(true); else setIdx(function(i){return i+1;});
+      setOpacity(1);
+    },280);
+  }
+
+  if (done||queue.length===0) {
+    return (
+      <div style={S.screen}>
+        <div style={S.doneCard}>
+          <div style={{fontSize:"3rem",marginBottom:"12px"}}>🎉</div>
+          <h2 style={S.doneTitle}>{queue.length===0?"Sin repasos pendientes":"¡Sesión completa!"}</h2>
+          <p style={S.doneSub}>{queue.length===0?"Vuelve más tarde o agrega ideas nuevas.":"Repasaste "+queue.length+" idea"+(queue.length!==1?"s":"")+"."}</p>
+          <button onClick={props.onBack} style={S.backNavBtn}>← Volver</button>
+        </div>
+      </div>
+    );
+  }
+
+  var current=queue[idx];
+  return (
+    <div style={S.screen}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"16px"}}>
+        <button onClick={props.onBack} style={S.backNavBtn}>← Salir</button>
+        <span style={{fontSize:"0.85rem",color:"#555"}}>{idx+1} / {queue.length}</span>
+      </div>
+      <div style={S.progressBar}>
+        <div style={Object.assign({},S.progressFill,{width:((idx/queue.length)*100)+"%"})} />
+      </div>
+      <div style={Object.assign({},S.flashCard,{opacity:opacity,transition:"opacity 0.28s ease"})}>
+        <div style={{color:"#4A3FBF",fontSize:"0.8rem",letterSpacing:"0.1em",marginBottom:"16px"}}>
+          {"◆".repeat(Math.min(current.srLevel||0,6))+"◇".repeat(Math.max(6-(current.srLevel||0),0))}
+        </div>
+        <p style={S.cardText}>{current.text}</p>
+        <div style={{marginTop:"20px",fontSize:"0.75rem",color:"#3A3A50"}}>{fmtDate(current.createdAt)}</div>
+      </div>
+      <div style={S.reviewActions}>
+        <button onClick={function(){next(false);}} style={S.forgotBtn}>No la recordaba</button>
+        <BlinkButton onClick={function(){next(true);}} label={"La recordé →"} />
+      </div>
+      <p style={{textAlign:"center",fontSize:"0.78rem",color:"#3A3A50",marginTop:"10px"}}>¿La tenías en mente antes de leerla?</p>
+    </div>
+  );
+}
+
+// ── App ───────────────────────────────────────────────────────────────────────
+function App() {
+  var s1=useState("capture"); var screen=s1[0]; var setScreen=s1[1];
+  var s2=useState(function(){return loadIdeas();}); var ideas=s2[0]; var setIdeas=s2[1];
+  var s3=useState(false); var showExport=s3[0]; var setShowExport=s3[1];
+
+  function handleSave(text) {
+    var idea={id:uid(),text:text,createdAt:new Date().toISOString(),srLevel:0,nextReview:nextReviewDate(0),lastReviewed:null};
+    var updated=[idea].concat(ideas); setIdeas(updated); saveIdeas(updated);
+  }
+  function handleUpdate(id,changes) {
+    var updated=ideas.map(function(i){return i.id===id?Object.assign({},i,changes):i;});
+    setIdeas(updated); saveIdeas(updated);
+  }
+  function handleDelete(id) {
+    var updated=ideas.filter(function(i){return i.id!==id;});
+    setIdeas(updated); saveIdeas(updated);
+  }
+  var dueCount=ideas.filter(isDue).length;
+
+  return (
+    <div>
+      {showExport && <ExportModal ideas={ideas} onClose={function(){setShowExport(false);}} />}
+      {screen==="capture" && <CaptureScreen onSave={handleSave} onGoReview={function(){setScreen("review");}} onGoLibrary={function(){setScreen("library");}} onGoExport={function(){setShowExport(true);}} totalIdeas={ideas.length} dueCount={dueCount} />}
+      {screen==="library" && <LibraryScreen ideas={ideas} onBack={function(){setScreen("capture");}} onUpdateIdea={handleUpdate} onDeleteIdea={handleDelete} onGoExport={function(){setShowExport(true);}} />}
+      {screen==="review" && <ReviewScreen ideas={ideas} onBack={function(){setScreen("capture");}} onUpdateIdea={handleUpdate} />}
+    </div>
+  );
+}
+
+var S = {
+  screen:{minHeight:"100vh",background:"#0F0F13",display:"flex",flexDirection:"column",padding:"24px 16px",maxWidth:"680px",margin:"0 auto"},
+  header:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"24px"},
+  appTitle:{fontSize:"1.5rem",fontWeight:700,color:"#F0EFF8",letterSpacing:"-0.02em"},
+  subtitle:{marginTop:"4px",fontSize:"0.82rem",color:"#666"},
+  reviewBtn:{display:"flex",alignItems:"center",gap:"6px",background:"#1A1A22",border:"1px solid #2A2A36",borderRadius:"10px",padding:"10px 14px",color:"#888",fontSize:"0.88rem",fontWeight:500,cursor:"pointer"},
+  reviewBtnActive:{background:"#1E1B38",border:"1px solid #4A3FBF",color:"#9B8FFF"},
+  badge:{background:"#6C63FF",color:"#fff",borderRadius:"99px",padding:"1px 7px",fontSize:"0.75rem",fontWeight:700,marginLeft:"4px"},
+  cardCapture:{background:"#16161E",border:"1px solid #222230",borderRadius:"16px",padding:"4px",marginBottom:"18px"},
+  textarea:{background:"transparent",border:"none",color:"#E8E8F0",fontSize:"1rem",lineHeight:"1.7",padding:"16px 16px 8px",minHeight:"180px",resize:"none",width:"100%",caretColor:"#6C63FF",fontFamily:"'Segoe UI',sans-serif",outline:"none"},
+  textareaFooter:{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 12px 12px",borderTop:"1px solid #1E1E2A"},
+  saveBtn:{background:"linear-gradient(135deg,#5A50EE,#8B5CF6)",color:"#fff",border:"none",borderRadius:"9px",padding:"10px 22px",fontSize:"0.9rem",fontWeight:600,cursor:"pointer"},
+  stats:{display:"flex",background:"#16161E",border:"1px solid #222230",borderRadius:"14px",overflow:"hidden",marginBottom:"12px"},
+  statBox:{flex:1,display:"flex",flexDirection:"column",alignItems:"center",padding:"16px 0"},
+  statNum:{fontSize:"1.8rem",fontWeight:700,color:"#D0CEFF",lineHeight:1,marginBottom:"4px"},
+  statLabel:{fontSize:"0.72rem",color:"#555",textTransform:"uppercase",letterSpacing:"0.06em"},
+  statDivider:{width:"1px",background:"#222230",margin:"12px 0"},
+  bottomBtn:{display:"flex",alignItems:"center",justifyContent:"center",gap:"8px",background:"#1A1E2A",border:"1px solid #2A3060",borderRadius:"12px",padding:"14px 16px",color:"#8899EE",fontSize:"0.92rem",fontWeight:600,cursor:"pointer"},
+  backNavBtn:{background:"#1A1A26",border:"1px solid #2A2A40",color:"#9B8FFF",fontSize:"0.9rem",fontWeight:600,cursor:"pointer",padding:"10px 18px",borderRadius:"10px"},
+  searchWrap:{display:"flex",alignItems:"center",gap:"8px",background:"#16161E",border:"1px solid #222230",borderRadius:"12px",padding:"10px 14px",marginBottom:"14px"},
+  searchInput:{flex:1,background:"transparent",border:"none",color:"#E8E8F0",fontSize:"0.95rem",outline:"none",fontFamily:"'Segoe UI',sans-serif"},
+  libCard:{background:"#16161E",border:"1px solid #222230",borderRadius:"14px",padding:"16px 16px"},
+  libCardText:{margin:"0 0 12px",fontSize:"0.95rem",lineHeight:"1.65",color:"#D8D7F0",whiteSpace:"pre-wrap"},
+  libCardMeta:{display:"flex",alignItems:"center",gap:"10px",justifyContent:"space-between",flexWrap:"wrap"},
+  editBtn:{background:"transparent",border:"1px solid #2A2A40",color:"#888",borderRadius:"8px",padding:"6px 12px",fontSize:"0.82rem",cursor:"pointer"},
+  deleteBtn:{background:"transparent",border:"1px solid #2A1A1A",color:"#664444",borderRadius:"8px",padding:"6px 10px",fontSize:"0.85rem",cursor:"pointer"},
+  cancelBtn:{background:"transparent",border:"1px solid #2A2A40",color:"#777",borderRadius:"8px",padding:"8px 16px",fontSize:"0.85rem",cursor:"pointer"},
+  saveSmallBtn:{background:"linear-gradient(135deg,#5A50EE,#8B5CF6)",color:"#fff",border:"none",borderRadius:"8px",padding:"8px 18px",fontSize:"0.85rem",fontWeight:600,cursor:"pointer"},
+  confirmWrap:{marginTop:"12px",paddingTop:"12px",borderTop:"1px solid #2A1A1A",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"10px"},
+  deleteConfirmBtn:{background:"#3A1A1A",border:"1px solid #6A2A2A",color:"#E07070",borderRadius:"8px",padding:"8px 16px",fontSize:"0.85rem",fontWeight:600,cursor:"pointer"},
+  progressBar:{height:"3px",background:"#1E1E2A",borderRadius:"99px",marginBottom:"24px",overflow:"hidden"},
+  progressFill:{height:"100%",background:"linear-gradient(90deg,#5A50EE,#9B59B6)",borderRadius:"99px",transition:"width 0.4s ease"},
+  flashCard:{background:"#16161E",border:"1px solid #242432",borderRadius:"20px",padding:"28px 24px",marginBottom:"24px",minHeight:"200px",display:"flex",flexDirection:"column",justifyContent:"space-between",flex:1},
+  cardText:{fontSize:"1.05rem",lineHeight:"1.75",color:"#E0DFF8",margin:0,flex:1,whiteSpace:"pre-wrap"},
+  reviewActions:{display:"flex",justifyContent:"center",gap:"12px",alignItems:"center",marginBottom:"12px",flexWrap:"wrap"},
+  forgotBtn:{background:"transparent",border:"1px solid #2A2A40",color:"#666",borderRadius:"12px",padding:"16px 24px",fontSize:"0.95rem",fontWeight:500,cursor:"pointer",minWidth:"150px"},
+  doneCard:{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",textAlign:"center",padding:"40px 0"},
+  doneTitle:{fontSize:"1.4rem",fontWeight:700,color:"#E0DFF8",margin:"0 0 10px"},
+  doneSub:{color:"#666",fontSize:"0.95rem",marginBottom:"32px"},
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
