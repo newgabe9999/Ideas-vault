@@ -2,7 +2,7 @@
   "name": "Ideas Vault",
   "short_name": "Ideas",
   "description": "Captura y repasa tus ideas con repaso espaciado",
-  "start_url": "./ideas-vault-pwa.html",
+  "start_url": "./index.html",
   "display": "standalone",
   "background_color": "#0F0F13",
   "theme_color": "#0F0F13",
